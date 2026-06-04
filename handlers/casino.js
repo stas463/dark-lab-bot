@@ -2,16 +2,38 @@
 const { getPlayer, savePlayer } = require('../utils/db')
 const { checkAchievements } = require('./achievements')
 
-// Хранилище активных игр (защита от спама)
+// Хранилище активных игр
 const activeGames = new Map()
 
-// ========== БЛЭКДЖЕК (ОЧКО) С ЗАЩИТОЙ ОТ СПАМА ==========
+// Эмодзи для мастей
+function getRandomSuit() {
+  const suits = ['♥️', '♦️', '♣️', '♠️']
+  return suits[Math.floor(Math.random() * suits.length)]
+}
+
+// Получить карту с мастью
+function getCard() {
+  const cards = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+  const card = cards[Math.floor(Math.random() * cards.length)]
+  let value = 0
+  if (card === 'A') value = 11
+  else if (['K', 'Q', 'J'].includes(card)) value = 10
+  else value = parseInt(card)
+  const suit = getRandomSuit()
+  return { card, value, display: `${card}${suit}` }
+}
+
+// Форматирование карт для вывода
+function formatCards(cards) {
+  return cards.map(c => c.display).join(' · ')
+}
+
+// ========== БЛЭКДЖЕК С КНОПКАМИ ==========
 async function handleBlackjack(ctx, bet) {
   const userId = ctx.from.id.toString()
   
-  // ЗАЩИТА ОТ СПАМА - если уже есть активная игра
   if (activeGames.has(userId)) {
-    await ctx.reply(`⏳ *У ТЕБЯ УЖЕ ЕСТЬ АКТИВНАЯ ИГРА!*\nДождись окончания или начни новую.`, { parse_mode: 'Markdown' })
+    await ctx.reply(`⏳ *У ТЕБЯ УЖЕ ЕСТЬ АКТИВНАЯ ИГРА!*`, { parse_mode: 'Markdown' })
     return
   }
   
@@ -22,152 +44,154 @@ async function handleBlackjack(ctx, bet) {
     return
   }
   
-  // Отмечаем игру как активную
-  activeGames.set(userId, true)
-  
-  function getCard() {
-    const cards = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-    const card = cards[Math.floor(Math.random() * cards.length)]
-    let value = 0
-    if (card === 'A') value = 11
-    else if (['K', 'Q', 'J'].includes(card)) value = 10
-    else value = parseInt(card)
-    return { card, value }
-  }
-  
+  // Начинаем игру
   const playerCards = [getCard(), getCard()]
   const dealerCards = [getCard()]
   
   let playerValue = playerCards.reduce((sum, c) => sum + c.value, 0)
-  let dealerValue = dealerCards[0].value
-  
   if (playerValue > 21 && playerCards.some(c => c.card === 'A')) playerValue -= 10
   
-  let message = `🃏 *БЛЭКДЖЕК (ОЧКО)*\n💰 СТАВКА: $${bet}\n\n`
-  message += `🎴 ТВОИ КАРТЫ: ${playerCards.map(c => c.card).join(' ')} = ${playerValue}\n`
-  message += `🎴 КАРТЫ ДИЛЕРА: ${dealerCards[0].card} | ?\n\n`
+  // Сохраняем состояние игры
+  activeGames.set(userId, {
+    bet,
+    playerCards,
+    dealerCards,
+    playerValue,
+    balance: player.balance
+  })
   
-  await ctx.reply(message, { parse_mode: 'Markdown' })
+  // Отправляем сообщение с кнопками
+  await showGameMessage(ctx, userId)
+}
+
+async function showGameMessage(ctx, userId) {
+  const game = activeGames.get(userId)
+  if (!game) return
   
-  // Проверка на блэкджек
-  if (playerValue === 21) {
-    const winAmount = bet * 2.5
-    await savePlayer(userId, { balance: player.balance - bet + winAmount })
-    await ctx.reply(`🎉 *БЛЭКДЖЕК!* ТЫ ВЫИГРАЛ $${winAmount}! 🎉`, { parse_mode: 'Markdown' })
+  const player = await getPlayer(userId)
+  const dealerValue = game.dealerCards[0].value
+  
+  let message = `🎰 *БЛЭКДЖЕК* 🎰\n\n`
+  message += `*СТАВКА:* ${game.bet} $\n\n`
+  message += `┌─────────────────────┐\n`
+  message += `│ *ДИЛЕР:* ${formatCards(game.dealerCards)} | ? │\n`
+  message += `├─────────────────────┤\n`
+  message += `│ *ТЫ:* ${formatCards(game.playerCards)} │\n`
+  message += `└─────────────────────┘\n\n`
+  message += `📊 *СЧЁТ:* ${game.playerValue}`
+  
+  if (game.playerValue === 21 && game.playerCards.length === 2) {
+    message += ` (БЛЭКДЖЕК!)\n\n✅ *ТЫ ПОБЕДИЛ!*`
+    const winAmount = game.bet * 2.5
+    await savePlayer(userId, { balance: player.balance - game.bet + winAmount })
+    await ctx.reply(message, { parse_mode: 'Markdown' })
     activeGames.delete(userId)
     return
   }
   
-  // Функция для ожидания ответа с таймаутом
-  const askForCard = async () => {
-    await ctx.reply(`🎴 *ЕЩЁ КАРТУ?* НАПИШИ "ДА" ИЛИ "НЕТ" (15 СЕКУНД)', { parse_mode: 'Markdown' })
-    
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        ctx.bot.off('text', handler)
-        resolve('нет')
-      }, 15000)
-      
-      const handler = async (msg) => {
-        if (msg.chat.id === ctx.chat.id) {
-          const text = msg.text.toLowerCase()
-          if (text === 'да' || text === 'нет') {
-            clearTimeout(timeout)
-            ctx.bot.off('text', handler)
-            resolve(text)
-          }
-        }
-      }
-      ctx.bot.on('text', handler)
-    })
+  if (game.playerValue > 21) {
+    message += `\n\n💀 *ПЕРЕБОР! ТЫ ПРОИГРАЛ!* 💀`
+    await savePlayer(userId, { balance: player.balance - game.bet })
+    await ctx.reply(message, { parse_mode: 'Markdown' })
+    activeGames.delete(userId)
+    return
   }
   
-  let stand = false
-  let bust = false
-  
-  while (!stand && playerValue < 21) {
-    const response = await askForCard()
-    
-    if (response === 'да') {
-      const newCard = getCard()
-      playerCards.push(newCard)
-      playerValue += newCard.value
-      if (playerValue > 21 && playerCards.some(c => c.card === 'A')) playerValue -= 10
-      
-      message = `🃏 *БЛЭКДЖЕК (ОЧКО)*\n💰 СТАВКА: $${bet}\n\n`
-      message += `🎴 ТВОИ КАРТЫ: ${playerCards.map(c => c.card).join(' ')} = ${playerValue}\n`
-      message += `🎴 КАРТЫ ДИЛЕРА: ${dealerCards[0].card} | ?\n\n`
-      await ctx.reply(message, { parse_mode: 'Markdown' })
-      
-      if (playerValue > 21) {
-        bust = true
-        break
-      }
-    } else {
-      stand = true
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🎴 ЕЩЕ', callback_data: `bj_hit_${userId}` },
+          { text: '🛑 СТОП', callback_data: `bj_stand_${userId}` }
+        ]
+      ]
     }
   }
   
-  if (bust) {
-    await savePlayer(userId, { balance: player.balance - bet })
-    await ctx.reply(`💀 *ПЕРЕБОР!* ТЫ ПРОИГРАЛ $${bet}. 💀`, { parse_mode: 'Markdown' })
-    
-    const stats = player.achievementStats || {}
-    stats.casino_bet = (stats.casino_bet || 0) + 1
-    await savePlayer(userId, { achievementStats: stats })
-    await checkAchievements(userId, 'casino_bet', 1)
-    activeGames.delete(userId)
+  await ctx.reply(message, { parse_mode: 'Markdown', ...keyboard })
+}
+
+async function handleHit(ctx, userId) {
+  const game = activeGames.get(userId)
+  if (!game) {
+    await ctx.answerCbQuery('❌ ИГРА ЗАКОНЧЕНА!')
+    return
+  }
+  
+  const newCard = getCard()
+  game.playerCards.push(newCard)
+  game.playerValue += newCard.value
+  
+  if (game.playerValue > 21 && game.playerCards.some(c => c.card === 'A')) {
+    game.playerValue -= 10
+  }
+  
+  activeGames.set(userId, game)
+  await showGameMessage(ctx, userId)
+}
+
+async function handleStand(ctx, userId) {
+  const game = activeGames.get(userId)
+  if (!game) {
+    await ctx.answerCbQuery('❌ ИГРА ЗАКОНЧЕНА!')
     return
   }
   
   // Ход дилера
-  while (dealerValue < 17) {
+  while (game.dealerValue < 17) {
     const newCard = getCard()
-    dealerCards.push(newCard)
-    dealerValue += newCard.value
-    if (dealerValue > 21 && dealerCards.some(c => c.card === 'A')) dealerValue -= 10
+    game.dealerCards.push(newCard)
+    game.dealerValue += newCard.value
+    if (game.dealerValue > 21 && game.dealerCards.some(c => c.card === 'A')) {
+      game.dealerValue -= 10
+    }
   }
   
-  message = `🃏 *БЛЭКДЖЕК (ОЧКО)*\n💰 СТАВКА: $${bet}\n\n`
-  message += `🎴 ТВОИ КАРТЫ: ${playerCards.map(c => c.card).join(' ')} = ${playerValue}\n`
-  message += `🎴 КАРТЫ ДИЛЕРА: ${dealerCards.map(c => c.card).join(' ')} = ${dealerValue}\n\n`
+  let message = `🎰 *БЛЭКДЖЕК* 🎰\n\n`
+  message += `*СТАВКА:* ${game.bet} $\n\n`
+  message += `┌─────────────────────┐\n`
+  message += `│ *ДИЛЕР:* ${formatCards(game.dealerCards)} | ${game.dealerValue} │\n`
+  message += `├─────────────────────┤\n`
+  message += `│ *ТЫ:* ${formatCards(game.playerCards)} | ${game.playerValue} │\n`
+  message += `└─────────────────────┘\n\n`
   
   let result = ''
   let win = false
   let winAmount = 0
   
-  if (dealerValue > 21) {
+  if (game.dealerValue > 21) {
     win = true
-    winAmount = bet * 2
-    result = `🎉 *ДИЛЕР ПЕРЕБРАЛ!* ТЫ ВЫИГРАЛ $${winAmount}! 🎉`
-  } else if (playerValue > dealerValue) {
+    winAmount = game.bet * 2
+    result = `🎉 *ДИЛЕР ПЕРЕБРАЛ! ТЫ ВЫИГРАЛ ${winAmount}$!* 🎉`
+  } else if (game.playerValue > game.dealerValue) {
     win = true
-    winAmount = bet * 2
-    result = `🎉 *ТЫ ВЫИГРАЛ!* $${winAmount}! 🎉`
-  } else if (playerValue < dealerValue) {
+    winAmount = game.bet * 2
+    result = `🎉 *ТЫ ВЫИГРАЛ!* ${winAmount}$ 🎉`
+  } else if (game.playerValue < game.dealerValue) {
     win = false
-    result = `💀 *ТЫ ПРОИГРАЛ!* $${bet}. 💀`
+    result = `💀 *ТЫ ПРОИГРАЛ!* ${game.bet}$ 💀`
   } else {
     win = true
-    winAmount = bet
-    result = `🤝 *НИЧЬЯ!* ВОЗВРАЩАЮ $${bet}. 🤝`
+    winAmount = game.bet
+    result = `🤝 *НИЧЬЯ!* ТЕБЕ ВЕРНУЛИ ${game.bet}$. 🤝`
+  }
+  
+  const player = await getPlayer(userId)
+  
+  if (win) {
+    await savePlayer(userId, { balance: player.balance - game.bet + winAmount })
+  } else {
+    await savePlayer(userId, { balance: player.balance - game.bet })
   }
   
   const stats = player.achievementStats || {}
   stats.casino_bet = (stats.casino_bet || 0) + 1
-  
-  if (win) {
-    await savePlayer(userId, { balance: player.balance - bet + winAmount, achievementStats: stats })
-    stats.casino_wins = (stats.casino_wins || 0) + 1
-    await checkAchievements(userId, 'casino_wins', 1)
-  } else {
-    await savePlayer(userId, { balance: player.balance - bet, achievementStats: stats })
-  }
-  
+  if (win) stats.casino_wins = (stats.casino_wins || 0) + 1
+  await savePlayer(userId, { achievementStats: stats })
   await checkAchievements(userId, 'casino_bet', 1)
-  await ctx.reply(message + result, { parse_mode: 'Markdown' })
+  if (win) await checkAchievements(userId, 'casino_wins', 1)
   
-  // Удаляем из активных игр
+  await ctx.editMessageText(message + result, { parse_mode: 'Markdown' })
   activeGames.delete(userId)
 }
 
@@ -269,7 +293,6 @@ async function handleRoulette(ctx, bet, betType, betValue) {
 async function handleCasinoCommand(ctx) {
   const text = ctx.message.text.toLowerCase()
   
-  // БЛЭКДЖЕК: очко 100
   const bjMatch = text.match(/^(?:очко|бдж|блэкджек)\s+(\d+)$/i)
   if (bjMatch) {
     const bet = parseInt(bjMatch[1])
@@ -281,7 +304,6 @@ async function handleCasinoCommand(ctx) {
     return
   }
   
-  // РУЛЕТКА: рул кра 100
   const rouletteMatch = text.match(/^рул(?:етка)?\s+(красное|кра|черное|чер|четное|чет|нечетное|неч|1-18|19-36|ряд[123]|столб[123]|\d+|зеро|0)\s+(\d+)$/i)
   if (rouletteMatch) {
     let betValue = rouletteMatch[1].toLowerCase()
@@ -292,75 +314,36 @@ async function handleCasinoCommand(ctx) {
       return
     }
     
-    // Нормализация коротких команд
     if (betValue === 'кра') betValue = 'красное'
     if (betValue === 'чер') betValue = 'черное'
     if (betValue === 'чет') betValue = 'четное'
     if (betValue === 'неч') betValue = 'нечетное'
     if (betValue === '0') betValue = 'зеро'
     
-    // Половины поля
-    if (betValue === '1-18') {
-      await handleRoulette(ctx, bet, 'half', '1-18')
-      return
-    }
-    if (betValue === '19-36') {
-      await handleRoulette(ctx, bet, 'half', '19-36')
-      return
-    }
+    if (betValue === '1-18') { await handleRoulette(ctx, bet, 'half', '1-18'); return }
+    if (betValue === '19-36') { await handleRoulette(ctx, bet, 'half', '19-36'); return }
+    if (betValue.match(/^ряд[123]$/)) { await handleRoulette(ctx, bet, 'row', betValue.replace('ряд', '')); return }
+    if (betValue.match(/^столб[123]$/)) { await handleRoulette(ctx, bet, 'column', betValue.replace('столб', '')); return }
+    if (betValue === 'красное' || betValue === 'черное') { await handleRoulette(ctx, bet, 'color', betValue); return }
+    if (betValue === 'четное' || betValue === 'нечетное') { await handleRoulette(ctx, bet, 'evenodd', betValue); return }
+    if (betValue === 'зеро') { await handleRoulette(ctx, bet, 'zero', null); return }
     
-    // Ряды
-    if (betValue.match(/^ряд[123]$/)) {
-      const row = betValue.replace('ряд', '')
-      await handleRoulette(ctx, bet, 'row', row)
-      return
-    }
-    
-    // Столбцы
-    if (betValue.match(/^столб[123]$/)) {
-      const col = betValue.replace('столб', '')
-      await handleRoulette(ctx, bet, 'column', col)
-      return
-    }
-    
-    // Цвета
-    if (betValue === 'красное' || betValue === 'черное') {
-      await handleRoulette(ctx, bet, 'color', betValue)
-      return
-    }
-    
-    // Чёт/нечет
-    if (betValue === 'четное' || betValue === 'нечетное') {
-      await handleRoulette(ctx, bet, 'evenodd', betValue)
-      return
-    }
-    
-    // Зеро
-    if (betValue === 'зеро') {
-      await handleRoulette(ctx, bet, 'zero', null)
-      return
-    }
-    
-    // Конкретное число
     const num = parseInt(betValue)
     if (num >= 0 && num <= 36) {
-      if (num === 0) {
-        await handleRoulette(ctx, bet, 'zero', null)
-      } else {
-        await handleRoulette(ctx, bet, 'exact', num)
-      }
+      if (num === 0) await handleRoulette(ctx, bet, 'zero', null)
+      else await handleRoulette(ctx, bet, 'exact', num)
       return
     }
     
-    await ctx.reply(`❌ НЕВЕРНАЯ СТАВКА!\n\nДОСТУПНО:\n• красное/кра\n• черное/чер\n• четное/чет\n• нечетное/неч\n• 1-18 / 19-36\n• ряд1/ряд2/ряд3\n• столб1/столб2/столб3\n• число 0-36\n• зеро`)
+    await ctx.reply(`❌ НЕВЕРНАЯ СТАВКА!`)
     return
   }
   
-  await ctx.reply(`🎰 *КАЗИНО* 🎰\n\n*КОМАНДЫ:*\n\n🃏 *БЛЭКДЖЕК (ОЧКО)*\nочко 100 — пример: очко 100\n\n🎡 *РУЛЕТКА*\nрул кра 100 — на красное\nрул чер 100 — на чёрное\nрул чет 100 — на чётное\nрул неч 100 — на нечётное\nрул 1-18 100 — 1-18\nрул 19-36 100 — 19-36\nрул ряд1 100 — 1 ряд\nрул столб2 100 — 2 столб\nрул 7 100 — на число 7\nрул зеро 100 — на зеро\n\n💰 *МИНИМАЛЬНАЯ СТАВКА: $1*`, { parse_mode: 'Markdown' })
+  await ctx.reply(`🎰 *КАЗИНО* 🎰\n\n*КОМАНДЫ:*\n\n🃏 *БЛЭКДЖЕК (ОЧКО)*\nочко 100 — начать игру\n\n🎡 *РУЛЕТКА*\nрул кра 100 — на красное\nрул чер 100 — на чёрное\nрул чет 100 — на чётное\nрул неч 100 — на нечётное\nрул 1-18 100\nрул 19-36 100\nрул ряд1 100\nрул столб2 100\nрул 7 100\nрул зеро 100\n\n💰 *МИНИМАЛЬНАЯ СТАВКА: $1*`, { parse_mode: 'Markdown' })
 }
 
 async function showCasino(ctx) {
-  await ctx.reply(`🎰 *КАЗИНО* 🎰\n\n*КОМАНДЫ:*\n\n🃏 *БЛЭКДЖЕК (ОЧКО)*\nочко 100 — сыграть в очко\n\n🎡 *РУЛЕТКА*\nрул кра 100 — на красное\nрул чер 100 — на чёрное\nрул чет 100 — на чётное\nрул неч 100 — на нечётное\nрул 1-18 100 — 1-18\nрул 19-36 100 — 19-36\nрул ряд1 100 — 1 ряд\nрул столб2 100 — 2 столб\nрул 7 100 — на число 7\nрул зеро 100 — на зеро\n\n💰 *МИНИМАЛЬНАЯ СТАВКА: $1*`, { parse_mode: 'Markdown' })
+  await ctx.reply(`🎰 *КАЗИНО* 🎰\n\n*КОМАНДЫ:*\n\n🃏 *БЛЭКДЖЕК (ОЧКО)*\nочко 100 — начать игру\n\n🎡 *РУЛЕТКА*\nрул кра 100 — на красное\nрул чер 100 — на чёрное\nрул чет 100 — на чётное\nрул неч 100 — на нечётное\nрул 1-18 100\nрул 19-36 100\nрул ряд1 100\nрул столб2 100\nрул 7 100\nрул зеро 100\n\n💰 *МИНИМАЛЬНАЯ СТАВКА: $1*`, { parse_mode: 'Markdown' })
 }
 
 async function handleCasino(ctx, gameType) {
@@ -372,4 +355,4 @@ async function handleCasino(ctx, gameType) {
   await ctx.answerCbQuery('ИСПОЛЬЗУЙ ТЕКСТОВЫЕ КОМАНДЫ! НАПИШИ /casino')
 }
 
-module.exports = { showCasino, handleCasino, handleCasinoCommand }
+module.exports = { showCasino, handleCasino, handleCasinoCommand, handleHit, handleStand }

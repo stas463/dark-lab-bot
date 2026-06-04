@@ -1,7 +1,12 @@
 // utils/db.js
 const { Redis } = require('@upstash/redis')
 
-const redis = Redis.fromEnv()
+// ПРЯМАЯ ПЕРЕДАЧА ТОКЕНА (временно для теста)
+const redis = new Redis({
+  url: 'https://divine-shrew-113506.upstash.io',
+  token: 'gQAAAAAAAbtiAAIgcDJjN2EyODdlZjRkNmI0NTRiOGYzNDVlNDNhMTI2NTZkYw'
+})
+
 const PREFIX = 'darklab:'
 
 function getUserKey(userId) {
@@ -44,6 +49,7 @@ async function getPlayer(userId, name = null) {
       createdAt: Date.now()
     }
     await redis.set(key, JSON.stringify(player))
+    console.log(`👤 Новый игрок: ${name || userId}`)
   } else if (typeof player === 'string') {
     player = JSON.parse(player)
   }
